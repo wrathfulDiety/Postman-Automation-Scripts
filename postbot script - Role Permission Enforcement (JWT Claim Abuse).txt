@@ -1,0 +1,187 @@
+// ============================================================================
+// POSTMAN GENERIC AUTHORIZATION CONTROL TEST
+// Role / Permission Enforcement (JWT Claim Abuse)
+// ============================================================================
+// Author      : Hasanka Amarasinghe
+// Version     : 1.0
+// Purpose     : Detect broken authorization where APIs trust client-supplied
+//               role/permission claims instead of enforcing server-side checks.
+// Scope       : Any request / collection (JWT-based auth only)
+// Output      : Tests tab only (audit-ready)
+// ============================================================================
+
+(function () {
+
+  const SUCCESS_CODES = [200, 201, 202, 204];
+  const endpoint = pm.request.url.toString();
+  const baselineStatus = pm.response.code;
+
+  /* =========================
+     HELPERS
+     ========================= */
+
+  function pass(name) {
+    pm.test(`✅ ${name}`, () => pm.expect(true).to.be.true);
+  }
+
+  function fail(name, severity, context, remediation) {
+    pm.test(`❌ ${name} [${severity}]`, function () {
+      pm.expect.fail(
+        `${name}\n\n` +
+        `Severity: ${severity}\n` +
+        `Context: ${context}\n\n` +
+        `Remediation:\n- ${remediation.join('\n- ')}`
+      );
+    });
+  }
+
+  function getJwtFromRequest() {
+    const auth = pm.request.headers.get('Authorization');
+    if (!auth || !auth.startsWith('Bearer ')) return null;
+    return auth.replace('Bearer ', '').trim();
+  }
+
+  function decodeJwt(token) {
+    try {
+      const payload = token.split('.')[1];
+      return JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/')));
+    } catch {
+      return null;
+    }
+  }
+
+  function mutateJwt(originalToken, mutateFn) {
+    const parts = originalToken.split('.');
+    if (parts.length !== 3) return null;
+
+    let payload = JSON.parse(
+      atob(parts[1].replace(/-/g, '+').replace(/_/g, '/'))
+    );
+
+    mutateFn(payload);
+
+    const newPayload = btoa(JSON.stringify(payload))
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/, '');
+
+    // Signature intentionally kept (invalid) – observable behavior only
+    return `${parts[0]}.${newPayload}.${parts[2]}`;
+  }
+
+  function remediationText() {
+    return [
+      'Enforce server-side authorization checks independent of JWT claims.',
+      'Do not trust role or permission values supplied by the client.',
+      'Validate user privileges against backend policy or database.',
+      'Apply least-privilege access control per endpoint.',
+      'Ensure privileged actions require explicit authorization checks.'
+    ];
+  }
+
+  /* =========================
+     BASELINE CHECK
+     ========================= */
+
+  pm.test('Authorization | Baseline request executed', function () {
+    pm.expect(baselineStatus).to.be.a('number');
+  });
+
+  /* =========================
+     JWT PRESENCE CHECK
+     ========================= */
+
+  const jwt = getJwtFromRequest();
+
+  if (!jwt) {
+    pass('Authorization | Not Applicable (No JWT in request)');
+    return;
+  }
+
+  const decoded = decodeJwt(jwt);
+
+  if (!decoded) {
+    pass('Authorization | Not Applicable (JWT not decodable)');
+    return;
+  }
+
+  /* =========================
+     ROLE / PERMISSION DISCOVERY
+     ========================= */
+
+  const roleKeys = ['role', 'roles', 'permissions', 'perms', 'scope'];
+  const presentKeys = roleKeys.filter(k => decoded[k] !== undefined);
+
+  if (presentKeys.length === 0) {
+    pass('Authorization | No role/permission claims present');
+    return;
+  }
+
+  pass(`Authorization | Role/permission claims detected (${presentKeys.join(', ')})`);
+
+  /* =========================
+     MUTATION TESTS
+     ========================= */
+
+  const mutations = [
+    {
+      name: 'Remove role / permission claims',
+      mutate: payload => presentKeys.forEach(k => delete payload[k]),
+      severity: 'CRITICAL'
+    },
+    {
+      name: 'Downgrade roles / permissions',
+      mutate: payload => {
+        presentKeys.forEach(k => {
+          payload[k] = Array.isArray(payload[k]) ? ['user'] : 'user';
+        });
+      },
+      severity: 'HIGH'
+    },
+    {
+      name: 'Inject malformed role values',
+      mutate: payload => {
+        presentKeys.forEach(k => payload[k] = null);
+      },
+      severity: 'MEDIUM'
+    }
+  ];
+
+  mutations.forEach(test => {
+
+    const mutatedJwt = mutateJwt(jwt, test.mutate);
+    if (!mutatedJwt) return;
+
+    pm.sendRequest({
+      url: pm.request.url.toString(),
+      method: pm.request.method,
+      header: {
+        ...pm.request.headers.toObject(),
+        Authorization: `Bearer ${mutatedJwt}`
+      },
+      body: pm.request.body ? pm.request.body.toObject?.() : undefined
+    }, function (err, res) {
+
+      pm.test(`Authorization | ${test.name}`, function () {
+
+        if (!res) {
+          pm.expect.fail('No response received for modified authorization test');
+        }
+
+        const success = SUCCESS_CODES.includes(res.code);
+
+        if (baselineStatus < 400 && success) {
+          fail(
+            `Authorization bypass detected – ${test.name}`,
+            test.severity,
+            `Endpoint: ${endpoint}\nResponse Code: ${res.code}`,
+            remediationText()
+          );
+        } else {
+          pm.expect(true).to.be.true;
+        }
+      });
+    });
+  });
+
+})();

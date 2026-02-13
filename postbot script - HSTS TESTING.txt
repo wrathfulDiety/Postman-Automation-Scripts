@@ -1,0 +1,154 @@
+// ============================================================================
+// POSTMAN GENERIC SECURITY AUDIT: HSTS TESTING
+// ============================================================================
+// Author      : Hasanka Amarasinghe
+// Version     : 1.0
+// Date        : 2025-12-17
+// Purpose     : Evaluate HSTS headers and HTTPS enforcement, including best practices
+// Notes       : Shows remediation steps under Tests tab, stores findings in collection variable
+// ============================================================================
+
+// =========================
+// CONFIGURATION / REMEDIATIONS
+// =========================
+const REMEDIATIONS = {
+    MISSING_HSTS: {
+        issue: 'HSTS header missing',
+        risk: 'Browsers may accept insecure HTTP connections, exposing users to MITM attacks',
+        fix: [
+            'Add Strict-Transport-Security header to all HTTPS responses',
+            'Use max-age >= 31536000 seconds, includeSubDomains and preload directives'
+        ],
+        priority: 'High'
+    },
+    WEAK_MAX_AGE: {
+        issue: 'HSTS max-age too low',
+        risk: 'Short max-age reduces effectiveness against protocol downgrade attacks',
+        fix: [
+            'Set max-age to at least 31536000 seconds (1 year)'
+        ],
+        priority: 'Medium'
+    },
+    MISSING_INCLUDE_SUBDOMAINS: {
+        issue: 'HSTS missing includeSubDomains directive',
+        risk: 'Subdomains may be accessed over HTTP, bypassing HSTS',
+        fix: [
+            'Add includeSubDomains to Strict-Transport-Security header'
+        ],
+        priority: 'Medium'
+    },
+    MISSING_PRELOAD: {
+        issue: 'HSTS missing preload directive',
+        risk: 'Domain cannot be included in browser HSTS preload lists',
+        fix: [
+            'Add preload directive to HSTS header if eligible'
+        ],
+        priority: 'Low'
+    },
+    NO_HTTPS_REDIRECT: {
+        issue: 'HTTPS redirection not enforced',
+        risk: 'Users accessing HTTP endpoints are not automatically redirected to HTTPS',
+        fix: [
+            'Redirect all HTTP requests to HTTPS'
+        ],
+        priority: 'High'
+    }
+};
+
+// =========================
+// STORE FINDINGS
+// =========================
+let auditFindings = [];
+let testResults = { passed: 0, failed: 0, total: 0 };
+
+// =========================
+// HELPER FUNCTIONS
+// =========================
+function logFinding(remediationKey, context='') {
+    const rem = REMEDIATIONS[remediationKey];
+    pm.test(`❌ ${rem.issue}`, function() {
+        testResults.total++;
+        testResults.failed++;
+        auditFindings.push({
+            key: remediationKey,
+            issue: rem.issue,
+            priority: rem.priority,
+            context,
+            fix: rem.fix
+        });
+        pm.expect.fail(`${rem.issue}\nContext: ${context}\nRisk: ${rem.risk}\nRemediation: ${rem.fix.join('; ')}`);
+    });
+}
+
+function logPass(testName) {
+    pm.test(`✅ ${testName}`, function() {
+        testResults.total++;
+        testResults.passed++;
+        pm.expect(true).to.be.true;
+    });
+}
+
+// =========================
+// DETECTION LOGIC
+// =========================
+const hstsHeader = pm.response.headers.get('Strict-Transport-Security') || '';
+const httpsUsed = pm.request.url.toString().startsWith('https://');
+
+if (!hstsHeader) {
+    logFinding('MISSING_HSTS', 'Header not present');
+} else {
+    logPass('HSTS header present');
+
+    // max-age check
+    const maxAgeMatch = hstsHeader.match(/max-age=(\d+)/i);
+    if (!maxAgeMatch) {
+        logFinding('WEAK_MAX_AGE', hstsHeader);
+    } else if (parseInt(maxAgeMatch[1], 10) < 31536000) {
+        logFinding('WEAK_MAX_AGE', `max-age=${maxAgeMatch[1]}`);
+    } else {
+        logPass(`HSTS max-age acceptable: ${maxAgeMatch[1]}`);
+    }
+
+    // includeSubDomains check
+    if (!/includeSubDomains/i.test(hstsHeader)) {
+        logFinding('MISSING_INCLUDE_SUBDOMAINS', hstsHeader);
+    } else {
+        logPass('HSTS includeSubDomains directive present');
+    }
+
+    // preload check
+    if (!/preload/i.test(hstsHeader)) {
+        logFinding('MISSING_PRELOAD', hstsHeader);
+    } else {
+        logPass('HSTS preload directive present');
+    }
+}
+
+// HTTPS redirection check
+if (!httpsUsed) {
+    logFinding('NO_HTTPS_REDIRECT', 'Request was over HTTP');
+} else {
+    logPass('Request already uses HTTPS, redirection test skipped');
+}
+
+// =========================
+// STORE SUMMARY IN COLLECTION VARIABLE
+// =========================
+pm.collectionVariables.set('hstsAuditResults', JSON.stringify({
+    timestamp: new Date().toISOString(),
+    endpoint: pm.request.url.toString(),
+    summary: testResults,
+    findings: auditFindings
+}));
+
+// =========================
+// FINAL SUMMARY TEST
+// =========================
+pm.test('[SUMMARY] HSTS Security Audit Completed', function() {
+    testResults.total++;
+    if (testResults.failed > 0) {
+        pm.expect.fail(`HSTS audit found ${testResults.failed} issue(s). See individual tests for remediation.`);
+    } else {
+        pm.expect(true).to.be.true;
+    }
+});

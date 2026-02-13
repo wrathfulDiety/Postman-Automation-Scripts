@@ -1,0 +1,116 @@
+// ============================================================================
+// POSTMAN GENERIC SECURITY AUDIT: IDOR (INSECURE DIRECT OBJECT REFERENCE)
+// ============================================================================
+// Author      : Hasanka Amarasinghe
+// Version     : 1.1
+// Date        : 2025-12-17
+// Purpose     : Detect IDOR vulnerabilities using conditional identifier
+//               discovery, active manipulation, and response comparison.
+// Notes       : Generic, reusable, audit-safe. Results shown in Tests tab.
+// ============================================================================
+
+(function () {
+
+  const SUCCESS_CODES = [200, 201, 202, 204];
+  const endpoint = pm.request.url.toString();
+  const baselineStatus = pm.response.code;
+  const baselineBody = pm.response.text();
+
+  const REMEDIATION = [
+    'Enforce object-level authorization checks server-side.',
+    'Validate ownership of requested objects against the authenticated user.',
+    'Avoid predictable or sequential identifiers.',
+    'Return 403 Forbidden for unauthorized object access.'
+  ];
+
+  /* -------------------- Helpers -------------------- */
+
+  const isNumeric = v => /^[0-9]+$/.test(String(v));
+  const isUUID = v =>
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(v));
+
+  const normalize = body => {
+    try { return JSON.stringify(JSON.parse(body)); }
+    catch { return body || ""; }
+  };
+
+  /* -------------------- Identifier Discovery -------------------- */
+
+  let identifiers = [];
+
+  // URL
+  pm.request.url.path.forEach(p => {
+    if (isNumeric(p) || isUUID(p)) identifiers.push(p);
+  });
+
+  pm.request.url.query.each(q => {
+    if (isNumeric(q.value) || isUUID(q.value)) identifiers.push(q.value);
+  });
+
+  if (pm.request.body && pm.request.body.raw) {
+    identifiers = identifiers.concat(
+      (pm.request.body.raw.match(/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/ig) || []),
+      (pm.request.body.raw.match(/\b\d{1,10}\b/g) || [])
+    );
+  }
+
+  identifiers = [...new Set(identifiers)];
+
+  /* -------------------- Conditional Control -------------------- */
+
+  if (identifiers.length === 0) {
+    pm.test('IDOR | No object identifiers detected (Control Not Applicable)', function () {
+      pm.expect(true).to.be.true;
+    });
+    return;
+  }
+
+  pm.test(`IDOR | Object identifiers detected (${identifiers.join(', ')})`, function () {
+    pm.expect(true).to.be.true;
+  });
+
+  /* -------------------- Active ID Manipulation -------------------- */
+
+  identifiers.forEach(original => {
+
+    const mutated = isNumeric(original)
+      ? String(Number(original) + 1)
+      : '11111111-1111-4111-8111-111111111111';
+
+    const modifiedUrl = endpoint.replace(original, mutated);
+    const modifiedBody = pm.request.body && pm.request.body.raw
+      ? pm.request.body.raw.replace(original, mutated)
+      : undefined;
+
+    pm.sendRequest({
+      url: modifiedUrl,
+      method: pm.request.method,
+      header: pm.request.headers.toObject(),
+      body: modifiedBody ? { mode: 'raw', raw: modifiedBody } : undefined
+    }, function (err, res) {
+
+      pm.test(`IDOR | Manipulated ID (${original} → ${mutated})`, function () {
+
+        if (!res) {
+          pm.expect.fail('No response received from manipulated request');
+        }
+
+        const statusOk = SUCCESS_CODES.includes(res.code);
+        const bodyDiff = normalize(res.text()) !== normalize(baselineBody);
+
+        if (baselineStatus < 400 && statusOk && bodyDiff) {
+          pm.expect.fail(
+            `Unauthorized object access detected\n\n` +
+            `Endpoint: ${endpoint}\n` +
+            `Identifier: ${original} → ${mutated}\n` +
+            `Status: ${res.code}\n\n` +
+            `Remediation:\n- ${REMEDIATION.join('\n- ')}`
+          );
+        } else {
+          pm.expect(true).to.be.true;
+        }
+      });
+    });
+  });
+
+})();

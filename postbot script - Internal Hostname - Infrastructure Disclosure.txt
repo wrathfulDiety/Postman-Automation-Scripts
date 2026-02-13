@@ -1,0 +1,199 @@
+
+// ============================================================================
+// ============================================================================
+// POSTMAN GENERIC SECURITY AUDIT
+// Control : Internal Hostname / Infrastructure Disclosure
+// Category: API Security Testing – Information Disclosure
+// ============================================================================
+// Author  : Hasanka Amarasinghe
+// Version : 1.0
+// Date    : 2025-12-17
+// Purpose : Detect exposure of internal hostnames, internal DNS domains,
+//           or non-public infrastructure identifiers in API responses.
+// Notes   : Generic, reusable across requests and collections.
+// ============================================================================
+// ============================================================================
+
+
+
+// =========================
+// CONFIGURATION
+// =========================
+const INTERNAL_HOST_PATTERNS = [
+    /\.local\b/i,
+    /\.internal\b/i,
+    /\.corp\b/i,
+    /\.lan\b/i,
+    /\bip-\d+-\d+-\d+-\d+\.ec2\.internal\b/i,
+    /\.compute\.internal\b/i
+];
+
+const REMEDIATION = [
+    "Remove internal hostnames and infrastructure identifiers from API responses.",
+    "Replace internal DNS names with public-safe aliases where required.",
+    "Disable verbose error messages and debug output in production environments.",
+    "Ensure infrastructure metadata is not exposed to unauthenticated or external clients."
+];
+
+
+// =========================
+// STATE
+// =========================
+let findings = [];
+let summary = { passed: 0, failed: 0, not_applicable: 0, total: 0 };
+const endpoint = pm.request.url.toString();
+
+
+// =========================
+// HELPERS
+// =========================
+function pass(testName) {
+    pm.test(`✅ ${testName}`, function () {
+        summary.total++;
+        summary.passed++;
+        pm.expect(true).to.be.true;
+    });
+}
+
+function notApplicable(testName) {
+    pm.test(`⚪ ${testName} [Not Applicable]`, function () {
+        summary.total++;
+        summary.not_applicable++;
+        pm.expect(true).to.be.true;
+    });
+}
+
+function fail(testName, severity, context) {
+    pm.test(`❌ ${testName} [${severity}]`, function () {
+        summary.total++;
+        summary.failed++;
+
+        findings.push({
+            endpoint,
+            test: testName,
+            severity,
+            context,
+            remediation: REMEDIATION
+        });
+
+        pm.expect.fail(
+            `${testName}
+Severity: ${severity}
+Context:
+${context}
+
+Remediation:
+- ${REMEDIATION.join("\n- ")}`
+        );
+    });
+}
+
+function matchInternalPatterns(value) {
+    return INTERNAL_HOST_PATTERNS.filter(rx => rx.test(value));
+}
+
+
+// =========================
+// RESPONSE PRESENCE CHECK
+// =========================
+if (!pm.response) {
+    notApplicable("Internal Hostname Disclosure Check – No response received");
+} else {
+
+
+// =========================
+// HEADER INSPECTION
+// =========================
+let headerHits = [];
+
+pm.response.headers.each(h => {
+    const combined = `${h.key}: ${h.value}`;
+    const matches = matchInternalPatterns(combined);
+    if (matches.length > 0) {
+        headerHits.push({
+            location: "Header",
+            name: h.key,
+            value: h.value
+        });
+    }
+});
+
+if (headerHits.length === 0) {
+    pass("No internal hostnames detected in response headers");
+} else {
+    headerHits.forEach(hit => {
+        fail(
+            "Internal hostname exposed in response header",
+            "High",
+            `Header: ${hit.name}\nValue: ${hit.value}`
+        );
+    });
+}
+
+
+// =========================
+// BODY INSPECTION
+// =========================
+let bodyHits = [];
+
+const responseBody = pm.response.text();
+
+if (!responseBody || responseBody.trim().length === 0) {
+    notApplicable("Internal Hostname Disclosure Check – Empty response body");
+} else {
+    matchInternalPatterns(responseBody).forEach(rx => {
+        const index = responseBody.search(rx);
+        const snippet = responseBody.substring(
+            Math.max(0, index - 50),
+            Math.min(responseBody.length, index + 100)
+        );
+
+        bodyHits.push({
+            pattern: rx.toString(),
+            snippet
+        });
+    });
+
+    if (bodyHits.length === 0) {
+        pass("No internal hostnames detected in response body");
+    } else {
+        bodyHits.forEach(hit => {
+            fail(
+                "Internal hostname exposed in response body",
+                "Medium",
+                `Matched Pattern: ${hit.pattern}\nSnippet:\n${hit.snippet}`
+            );
+        });
+    }
+}
+
+
+// =========================
+// STORE AUDIT RESULTS
+// =========================
+pm.collectionVariables.set(
+    "internalHostnameAudit",
+    JSON.stringify({
+        timestamp: new Date().toISOString(),
+        endpoint,
+        summary,
+        findings
+    })
+);
+
+
+// =========================
+// FINAL SUMMARY
+// =========================
+pm.test("[SUMMARY] Internal Infrastructure Exposure Audit Completed", function () {
+    summary.total++;
+    if (summary.failed > 0) {
+        pm.expect.fail(
+            `Audit identified ${summary.failed} issue(s). Review failed tests for severity and remediation.`
+        );
+    } else {
+        pm.expect(true).to.be.true;
+    }
+});
+
+}

@@ -1,0 +1,195 @@
+// ============================================================================
+// POSTMAN GENERIC SECURITY AUDIT: INFORMATION DISCLOSURE (STACK TRACES & PATHS)
+// ============================================================================
+// Author      : Hasanka Amarasinghe
+// Version     : 1.0
+// Date        : 2025-12-17
+// Purpose     : Detect exposure of internal application logic via stack traces,
+//               file paths, debug output, or verbose error messages in API
+//               responses. Results are severity-based, audit-ready, and shown
+//               under the Tests tab with remediation guidance.
+// Notes       : Generic, reusable across requests and collections.
+// ============================================================================
+
+
+// =========================
+// CONFIGURATION
+// =========================
+const PATTERNS = [
+    {
+        name: 'Java Stack Trace',
+        regex: /(Exception in thread|at\s+[a-zA-Z0-9_.]+\([A-Za-z0-9_.]+\.java:\d+\))/,
+        severity: 'HIGH',
+        remediation: [
+            'Disable stack trace exposure in production.',
+            'Return generic error messages to clients.',
+            'Log detailed exceptions server-side only.'
+        ]
+    },
+    {
+        name: '.NET Stack Trace',
+        regex: /(at\s+[A-Za-z0-9_.]+\.[A-Za-z0-9_]+\([^)]+\))/,
+        severity: 'HIGH',
+        remediation: [
+            'Disable detailed error pages in production.',
+            'Configure custom error handling middleware.',
+            'Prevent framework stack traces from reaching clients.'
+        ]
+    },
+    {
+        name: 'Python Stack Trace',
+        regex: /(Traceback \(most recent call last\):)/,
+        severity: 'HIGH',
+        remediation: [
+            'Disable debug mode in production.',
+            'Replace detailed tracebacks with generic error responses.',
+            'Ensure exception handling is centralized.'
+        ]
+    },
+    {
+        name: 'Node.js Stack Trace',
+        regex: /(at\s+Object\.<anonymous>|at\s+processTicksAndRejections)/,
+        severity: 'HIGH',
+        remediation: [
+            'Disable verbose stack traces in production.',
+            'Use centralized error handling.',
+            'Return sanitized error messages to clients.'
+        ]
+    },
+    {
+        name: 'Internal Unix Path Disclosure',
+        regex: /(\/var\/www\/|\/etc\/|\/usr\/|\/home\/)/,
+        severity: 'MEDIUM',
+        remediation: [
+            'Avoid exposing internal file system paths.',
+            'Sanitize error messages before returning responses.',
+            'Map internal paths to generic references.'
+        ]
+    },
+    {
+        name: 'Internal Windows Path Disclosure',
+        regex: /(C:\\\\inetpub\\\\|C:\\\\Windows\\\\|D:\\\\)/,
+        severity: 'MEDIUM',
+        remediation: [
+            'Avoid exposing internal Windows directory paths.',
+            'Ensure error handling does not leak file locations.',
+            'Use generic error responses.'
+        ]
+    },
+    {
+        name: 'Debug / Verbose Error Indicators',
+        regex: /(debug=true|stacktrace|exception|error details)/i,
+        severity: 'LOW',
+        remediation: [
+            'Disable debug flags in production.',
+            'Ensure verbose logging is server-side only.',
+            'Return minimal error information to clients.'
+        ]
+    }
+];
+
+
+// =========================
+// STATE
+// =========================
+let findings = [];
+let summary = { passed: 0, failed: 0, total: 0 };
+
+
+// =========================
+// HELPERS
+// =========================
+function pass(testName) {
+    pm.test(`✅ ${testName}`, function () {
+        summary.total++;
+        summary.passed++;
+        pm.expect(true).to.be.true;
+    });
+}
+
+function fail(testName, severity, context, remediation) {
+    pm.test(`❌ ${testName} [${severity}]`, function () {
+        summary.total++;
+        summary.failed++;
+
+        findings.push({
+            test: testName,
+            severity,
+            context,
+            remediation
+        });
+
+        pm.expect.fail(
+            `${testName}
+Severity: ${severity}
+Context: ${context}
+Remediation:
+- ${remediation.join('\n- ')}`
+        );
+    });
+}
+
+
+// =========================
+// RESPONSE EXTRACTION
+// =========================
+const responseBody = pm.response.text() || '';
+const responseHeaders = pm.response.headers.all()
+    .map(h => `${h.key}: ${h.value}`)
+    .join('\n');
+
+
+// =========================
+// DETECTION LOGIC
+// =========================
+let issueDetected = false;
+
+PATTERNS.forEach(pattern => {
+    if (pattern.regex.test(responseBody) || pattern.regex.test(responseHeaders)) {
+        issueDetected = true;
+
+        const matchSource = pattern.regex.test(responseBody)
+            ? 'Response Body'
+            : 'Response Headers';
+
+        fail(
+            `Information Disclosure: ${pattern.name}`,
+            pattern.severity,
+            `${matchSource} matched pattern`,
+            pattern.remediation
+        );
+    }
+});
+
+if (!issueDetected) {
+    pass('No stack traces, internal paths, or debug information detected');
+}
+
+
+// =========================
+// STORE AUDIT RESULTS
+// =========================
+pm.collectionVariables.set(
+    'infoDisclosureAuditResults',
+    JSON.stringify({
+        timestamp: new Date().toISOString(),
+        endpoint: pm.request.url.toString(),
+        summary,
+        findings
+    })
+);
+
+
+// =========================
+// FINAL SUMMARY
+// =========================
+pm.test('[SUMMARY] Information Disclosure Security Audit Completed', function () {
+    summary.total++;
+    if (summary.failed > 0) {
+        pm.expect.fail(
+            `Information disclosure audit found ${summary.failed} issue(s). Review failed tests for severity and remediation.`
+        );
+    } else {
+        pm.expect(true).to.be.true;
+    }
+});

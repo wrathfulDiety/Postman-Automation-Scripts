@@ -1,0 +1,157 @@
+// ============================================================================
+// POSTMAN GENERIC SECURITY AUDIT: JWT TOKEN EXPIRATION
+// ============================================================================
+// Author      : Hasanka Amarasinghe
+// Version     : 1.0
+// Date        : 2025-12-17
+// Purpose     : Detect JWT TOKEN EXPIRATION
+//               discovery, active manipulation, and response comparison.
+// Notes       : Generic, reusable, audit-safe. Results shown in Tests tab.
+// ============================================================================
+
+(function () {
+
+  const MAX_LIFETIME = 24 * 60 * 60; // 24 hours
+  const SUCCESS_CODES = [200, 201, 202, 204];
+
+  const REMEDIATION = {
+    missingExp: [
+      "Ensure all access tokens include an 'exp' (expiration) claim.",
+      "Reject tokens that do not define an explicit expiration time.",
+      "Use short-lived access tokens with refresh tokens for continuity."
+    ],
+    longLived: [
+      "Reduce access token lifetime to the minimum required (e.g., 5–15 minutes).",
+      "Avoid issuing long-lived access tokens.",
+      "Use refresh tokens instead of extending access token validity."
+    ],
+    expiredAccepted: [
+      "Enforce strict server-side validation of token expiration.",
+      "Reject expired tokens consistently with HTTP 401 or 403.",
+      "Do not rely on client-side token expiry enforcement."
+    ]
+  };
+
+  let findings = [];
+  let summary = { total: 0, passed: 0, failed: 0 };
+
+  function pass(name) {
+    pm.test(`✅ ${name}`, function () {
+      summary.total++;
+      summary.passed++;
+      pm.expect(true).to.be.true;
+    });
+  }
+
+  function fail(name, severity, context, remediationList) {
+    pm.test(`❌ ${name} [${severity}]`, function () {
+      summary.total++;
+      summary.failed++;
+      findings.push({ test: name, severity, context, remediation: remediationList });
+      pm.expect.fail(`${name}\nSeverity: ${severity}\nContext: ${context}\nRemediation:\n- ${remediationList.join("\n- ")}`);
+    });
+  }
+
+  function base64UrlDecode(str) {
+    try {
+      str = str.replace(/-/g, "+").replace(/_/g, "/");
+      return JSON.parse(atob(str));
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function extractJwt() {
+    const auth = pm.request.headers.get("Authorization");
+    if (auth && auth.startsWith("Bearer ")) return auth.replace("Bearer ", "").trim();
+    const cookies = pm.request.headers.get("Cookie");
+    if (cookies) {
+      const match = cookies.match(/([A-Za-z0-9-_]+\.[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+)/);
+      if (match) return match[1];
+    }
+    return null;
+  }
+
+  const jwt = extractJwt();
+  if (!jwt) {
+    pass("JWT token not detected – Control Not Applicable");
+    finalize();
+    return;
+  }
+
+  const parts = jwt.split(".");
+  if (parts.length !== 3) {
+    fail("Invalid JWT structure", "Medium", "JWT does not have 3 parts", REMEDIATION.missingExp);
+    finalize();
+    return;
+  }
+
+  const payload = base64UrlDecode(parts[1]);
+  if (!payload) {
+    fail("JWT payload could not be decoded", "Medium", "Unable to parse JWT payload", REMEDIATION.missingExp);
+    finalize();
+    return;
+  }
+
+  pass("JWT detected and decoded successfully");
+
+  // EXP check
+  if (!payload.exp) {
+    fail("JWT missing exp claim", "High", "Token does not define expiration", REMEDIATION.missingExp);
+    finalize();
+    return;
+  } else {
+    pass("JWT exp claim present");
+  }
+
+  const lifetime = payload.iat ? (payload.exp - payload.iat) : null;
+  if (lifetime && lifetime > MAX_LIFETIME) {
+    fail("JWT access token lifetime is too long", "Medium", `Lifetime: ${lifetime} seconds`, REMEDIATION.longLived);
+  } else {
+    pass("JWT lifetime within acceptable bounds");
+  }
+
+  // Expired token replay (only for requests that can have a body or headers)
+  const expiredPayload = { ...payload, exp: Math.floor(Date.now() / 1000) - 3600 };
+  const expiredToken = parts[0] + "." + btoa(JSON.stringify(expiredPayload)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "") + "." + parts[2];
+
+  const reqHeaders = { ...pm.request.headers.toObject(), Authorization: "Bearer " + expiredToken };
+  const reqBody = pm.request.body && pm.request.body.raw ? { mode: "raw", raw: pm.request.body.raw } : undefined;
+
+  pm.sendRequest({
+    url: pm.request.url.toString(),
+    method: pm.request.method,
+    header: reqHeaders,
+    body: reqBody
+  }, function (err, res) {
+    if (!res) {
+      fail("Expired token replay failed", "Low", "No response received", REMEDIATION.expiredAccepted);
+      finalize();
+      return;
+    }
+
+    if (SUCCESS_CODES.includes(res.code)) {
+      fail("API accepts expired JWT", "Critical", `Expired token returned HTTP ${res.code}`, REMEDIATION.expiredAccepted);
+    } else {
+      pass("Expired JWT correctly rejected by API");
+    }
+
+    finalize();
+  });
+
+  function finalize() {
+    pm.collectionVariables.set("jwtExpirationAudit", JSON.stringify({
+      timestamp: new Date().toISOString(),
+      endpoint: pm.request.url.toString(),
+      findings,
+      summary
+    }));
+
+    pm.test("[SUMMARY] JWT Expiration Security Audit Completed", function () {
+      summary.total++;
+      if (summary.failed > 0) pm.expect.fail(`JWT expiration audit identified ${summary.failed} issue(s). Review failed tests for remediation.`);
+      else pm.expect(true).to.be.true;
+    });
+  }
+
+})();

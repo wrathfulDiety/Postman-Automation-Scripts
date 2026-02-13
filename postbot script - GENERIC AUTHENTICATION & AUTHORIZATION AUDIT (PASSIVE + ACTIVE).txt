@@ -1,0 +1,195 @@
+// ============================================================================
+// GENERIC AUTHENTICATION & AUTHORIZATION AUDIT (PASSIVE + ACTIVE)
+/**
+ * ============================================================================
+ * Author        : Hasanka Amarasinghe
+ * Version       : 1.0
+ * Date          : 2025-12-17
+ * Purpose       : Generic authentication & authorization enforcement testing
+ * Scope         : Passive + limited active auth checks (Postman-safe)
+ * Notes         :
+ *  - Results appear ONLY under the Tests tab
+ *  - No raw credentials are logged
+ *  - Active tests are non-authoritative and clearly marked
+ *  - Designed for audit / consulting / team-wide reuse
+ * ============================================================================
+ */
+
+/* -------------------------
+   Utility helpers
+-------------------------- */
+function hasHeader(name) {
+    return pm.request.headers.has(name);
+}
+
+function getHeader(name) {
+    return pm.request.headers.get(name);
+}
+
+function hasCookies() {
+    return pm.request.cookies && pm.request.cookies.count() > 0;
+}
+
+function bodyHasPotentialCreds() {
+    const body = pm.request.body;
+    if (!body) return false;
+
+    const keywords = ['password', 'passwd', 'pwd', 'token', 'secret', 'api_key', 'apikey'];
+
+    let values = [];
+
+    if (body.mode === 'raw' && body.raw) {
+        values.push(body.raw.toLowerCase());
+    }
+
+    if (body.mode === 'urlencoded' && Array.isArray(body.urlencoded)) {
+        body.urlencoded.forEach(item => {
+            if (item.key) values.push(item.key.toLowerCase());
+            if (item.value) values.push(String(item.value).toLowerCase());
+        });
+    }
+
+    if (body.mode === 'formdata' && Array.isArray(body.formdata)) {
+        body.formdata.forEach(item => {
+            if (item.key) values.push(item.key.toLowerCase());
+            if (item.value) values.push(String(item.value).toLowerCase());
+        });
+    }
+
+    return keywords.some(k => values.some(v => v.includes(k)));
+}
+
+function isSuccessStatus(code) {
+    return code >= 200 && code < 400;
+}
+
+function recordFinding(key, value) {
+    pm.collectionVariables.set(key, JSON.stringify(value));
+}
+
+/* -------------------------
+   Passive Inspection Tests
+-------------------------- */
+
+pm.test(""Auth Check (Passive): Authorization header present"", function () {
+    const present = hasHeader(""Authorization"");
+    pm.expect(true).to.eql(true); // always pass, informational
+
+    if (!present) {
+        recordFinding(""auth_missing_header"", {
+            risk: ""Medium"",
+            finding: ""No Authorization header observed"",
+            remediation: ""Ensure authentication headers are required for protected endpoints""
+        });
+    }
+});
+
+pm.test(""Auth Check (Passive): Session cookies present"", function () {
+    pm.expect(true).to.eql(true);
+
+    if (!hasCookies()) {
+        recordFinding(""auth_missing_cookies"", {
+            risk: ""Medium"",
+            finding: ""No session cookies observed"",
+            remediation: ""Verify whether the endpoint relies on stateless or cookie-based authentication""
+        });
+    }
+});
+
+pm.test(""Auth Check (Passive): Body-based credentials detected"", function () {
+    pm.expect(true).to.eql(true);
+
+    if (bodyHasPotentialCreds()) {
+        recordFinding(""auth_body_credentials"", {
+            risk: ""High"",
+            finding: ""Credentials appear to be supplied via request body"",
+            remediation: ""Ensure body-based credentials are strictly validated and not accepted anonymously""
+        });
+    }
+});
+
+/* -------------------------
+   Response Behavior Analysis
+-------------------------- */
+
+pm.test(""Auth Enforcement: Response indicates protected access behavior"", function () {
+    const status = pm.response.code;
+    pm.expect(true).to.eql(true);
+
+    if (isSuccessStatus(status)) {
+        recordFinding(""auth_success_response"", {
+            risk: ""Info"",
+            finding: ""Endpoint returned successful HTTP status"",
+            note: ""Success alone does not confirm auth bypass; body inspection required"",
+            remediation: ""Confirm authentication enforcement via negative test cases""
+        });
+    }
+});
+
+pm.test(""Auth Enforcement: No explicit 401/403 challenge observed"", function () {
+    pm.expect(true).to.eql(true);
+
+    if (![401, 403].includes(pm.response.code)) {
+        recordFinding(""auth_no_challenge"", {
+            risk: ""Medium"",
+            finding: ""Endpoint did not explicitly challenge unauthenticated access"",
+            remediation: ""Ensure protected endpoints return 401/403 for unauthenticated requests""
+        });
+    }
+});
+
+/* -------------------------
+   Limited Active Test (Safe)
+   Header-only auth removal
+-------------------------- */
+
+pm.test(""Auth Check (Active): Header-only auth removal test executed"", function () {
+    pm.expect(true).to.eql(true);
+
+    if (!hasHeader(""Authorization"")) return;
+
+    const modifiedRequest = {
+        url: pm.request.url.toString(),
+        method: pm.request.method,
+        header: pm.request.headers
+            .filter(h => h.key.toLowerCase() !== ""authorization""),
+        body: pm.request.body
+    };
+
+    pm.sendRequest(modifiedRequest, function (err, res) {
+        if (!err && isSuccessStatus(res.code)) {
+            recordFinding(""auth_header_bypass_possible"", {
+                risk: ""High"",
+                finding: ""Request succeeded after removing Authorization header"",
+                limitation: ""Header-only test; body/cookie auth not removed"",
+                remediation: [
+                    ""Enforce authentication server-side"",
+                    ""Reject unauthenticated requests explicitly"",
+                    ""Review access control middleware""
+                ]
+            });
+        }
+    });
+});
+
+/* -------------------------
+   Summary Test
+-------------------------- */
+
+pm.test(""Authentication Testing Summary (Informational)"", function () {
+    pm.expect(true).to.eql(true);
+
+    recordFinding(""auth_testing_summary"", {
+        coverage: [
+            ""Passive inspection of headers, cookies, body"",
+            ""Response behavior analysis"",
+            ""Limited active header-based negative test""
+        ],
+        limitations: [
+            ""Body-based credential mutation not safely automatable in Postman"",
+            ""200 OK responses may still indicate auth failure via response body"",
+            ""Multi-step auth flows require proxy/manual testing""
+        ],
+        recommended_next_step: ""Validate findings using Burp Suite or manual replay for confirmation""
+    });
+});

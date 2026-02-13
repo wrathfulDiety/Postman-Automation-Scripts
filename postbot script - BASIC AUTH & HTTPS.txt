@@ -1,0 +1,187 @@
+// ============================================================================
+// POSTMAN GENERIC SECURITY AUDIT: BASIC AUTH & HTTPS
+// ============================================================================
+// Objective: Detect insecure Basic Auth usage, weak/default credentials,
+// and TLS enforcement issues. Provides remediation guidance in Tests tab.
+// ============================================================================
+// Author: Hasanka Amarasinghe
+// Version: 1.0
+// Date: 2025-12-17
+// Purpose: Detect insecure Basic Auth usage, weak/default credentials, 
+//          and TLS enforcement issues. Provides remediation guidance in Tests tab.
+// Notes: This script can be used on any Postman request or collection.
+// ============================================================================
+// =========================
+// CONFIGURATION
+// =========================
+const REMEDIATIONS = {
+    BASIC_AUTH_USED: {
+        issue: 'Endpoint accepts Basic Authentication',
+        risk: 'Basic Auth transmits credentials that can be intercepted if HTTPS is not enforced.',
+        fix: [
+            'Disable Basic Authentication entirely.',
+            'Implement stronger authentication mechanisms (Bearer/JWT/API Key).'
+        ],
+        priority: 'HIGH'
+    },
+    WEAK_CREDENTIALS: {
+        issue: 'Weak or default credentials detected in Basic Auth',
+        risk: 'Credentials like admin/admin, password, 1234 are easily guessable and compromise security.',
+        fix: [
+            'Replace default/weak credentials with strong, complex passwords.',
+            'Enforce credential rotation and minimum complexity policies.'
+        ],
+        priority: 'CRITICAL'
+    },
+    BASIC_AUTH_WHEN_STRONGER_PRESENT: {
+        issue: 'Endpoint accepts Basic Auth even when stronger authentication is provided',
+        risk: 'Weakens security by allowing fallback to less secure authentication.',
+        fix: [
+            'Configure the endpoint to reject Basic Auth when stronger methods are supported.',
+            'Enforce strict authentication policy across all endpoints.'
+        ],
+        priority: 'HIGH'
+    },
+    TLS_NOT_ENFORCED: {
+        issue: 'HTTP endpoint used or TLS not enforced',
+        risk: 'Data transmitted in plaintext can be intercepted (MITM attack).',
+        fix: [
+            'Enforce HTTPS for all endpoints and disable HTTP access entirely.',
+            'Implement HSTS with an appropriate max-age and includeSubDomains.'
+        ],
+        priority: 'CRITICAL'
+    }
+};
+
+// Store all findings for summary
+let auditFindings = [];
+let testResults = { passed: 0, failed: 0, total: 0 };
+
+// =========================
+// HELPER FUNCTIONS
+// =========================
+function logFinding(remediationKey, context = '') {
+    const rem = REMEDIATIONS[remediationKey];
+    pm.test(`❌ ${rem.issue}`, function() {
+        testResults.total++;
+        testResults.failed++;
+        auditFindings.push({
+            key: remediationKey,
+            issue: rem.issue,
+            priority: rem.priority,
+            context,
+            fix: rem.fix
+        });
+        pm.expect.fail(`${rem.issue}. Context: ${context}`);
+    });
+}
+
+function logPass(testName) {
+    pm.test(`✅ ${testName}`, function() {
+        testResults.total++;
+        testResults.passed++;
+        pm.expect(true).to.be.true;
+    });
+}
+
+function decodeBasicAuth(authHeader) {
+    try {
+        const base64Part = authHeader.split(' ')[1];
+        const decoded = atob(base64Part);
+        return decoded;
+    } catch (e) {
+        return null;
+    }
+}
+
+function isWeakCredential(username, password) {
+    const weakList = ['admin', 'password', '1234', 'root', 'guest'];
+    return weakList.includes(username.toLowerCase()) || weakList.includes(password.toLowerCase());
+}
+
+// =========================
+// TEST 1: Basic Auth Presence
+// =========================
+const authHeader = pm.request.headers.get('Authorization');
+const isBasicAuth = authHeader && authHeader.toLowerCase().startsWith('basic ');
+
+if (isBasicAuth) {
+    logFinding('BASIC_AUTH_USED', 'Authorization header uses Basic Auth');
+    
+    // TEST 2: Weak/Default Credentials
+    const decoded = decodeBasicAuth(authHeader);
+    if (decoded) {
+        const [user, pass] = decoded.split(':');
+        if (isWeakCredential(user, pass)) {
+            logFinding('WEAK_CREDENTIALS', `Detected username: ""${user}"" with weak password`);
+        } else {
+            logPass('Basic Auth credentials are not weak/default');
+        }
+    }
+} else {
+    logPass('No Basic Auth detected');
+}
+
+// =========================
+// TEST 3: Basic Auth Allowed When Stronger Auth Provided
+// =========================
+let strongerAuthDetected = false;
+pm.request.headers.each(function(header) {
+    const key = header.key.toLowerCase();
+    const value = header.value.toLowerCase();
+    if (key === 'authorization' && (value.startsWith('bearer ') || value.includes('api_key'))) {
+        strongerAuthDetected = true;
+    }
+});
+
+if (strongerAuthDetected && isBasicAuth) {
+    logFinding('BASIC_AUTH_WHEN_STRONGER_PRESENT', 'Basic Auth allowed even when stronger auth provided');
+} else {
+    logPass('Endpoint correctly prioritizes stronger authentication');
+}
+
+// =========================
+// TEST 4: TLS / HTTPS Enforcement
+// =========================
+const requestUrl = pm.request.url.toString();
+const isHttps = requestUrl.toLowerCase().startsWith('https://');
+const isHttp = requestUrl.toLowerCase().startsWith('http://');
+
+if (!isHttps) {
+    logFinding('TLS_NOT_ENFORCED', `Request sent over HTTP: ${requestUrl}`);
+} else {
+    logPass('HTTPS is enforced');
+
+    // Optional: check if HTTP redirects to HTTPS (for redirects)
+    if (pm.response.code >= 300 && pm.response.code < 400) {
+        const locationHeader = pm.response.headers.get('Location');
+        const redirectsToHttps = locationHeader && locationHeader.toLowerCase().startsWith('https://');
+        if (!redirectsToHttps) {
+            logFinding('TLS_NOT_ENFORCED', 'HTTP endpoint does not redirect to HTTPS');
+        } else {
+            logPass('HTTP properly redirects to HTTPS');
+        }
+    }
+}
+
+// =========================
+// STORE SUMMARY IN COLLECTION VARIABLE
+// =========================
+pm.collectionVariables.set('basicAuthAuditResults', JSON.stringify({
+    timestamp: new Date().toISOString(),
+    endpoint: requestUrl,
+    summary: testResults,
+    findings: auditFindings
+}));
+
+// =========================
+// FINAL TEST SUMMARY
+// =========================
+pm.test('[SUMMARY] Security Audit Completed', function() {
+    testResults.total++;
+    if (testResults.failed > 0) {
+        pm.expect.fail(`Security audit found ${testResults.failed} issue(s). See individual tests for remediation.`);
+    } else {
+        pm.expect(true).to.be.true;
+    }
+});

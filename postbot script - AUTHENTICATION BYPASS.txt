@@ -1,0 +1,197 @@
+// ============================================================================
+// POSTMAN GENERIC SECURITY AUDIT: AUTHENTICATION BYPASS
+// ============================================================================
+// Author: Hasanka Amarasinghe
+// Version: 1.0
+// Date: 2025-12-17
+// Purpose: Detect authentication bypass scenarios in API endpoints.
+// ============================================================================
+
+// =========================
+// CONFIGURATION
+// =========================
+const REMEDIATIONS = {
+    NO_AUTH_ACCESS: {
+        issue: 'Endpoint accessible without authentication',
+        risk: 'Allows unauthorized users to access protected resources.',
+        fix: [
+            'Enforce authentication on all endpoints.',
+            'Implement strict access controls.'
+        ],
+        priority: 'CRITICAL'
+    },
+    INVALID_TOKEN_ACCEPTED: {
+        issue: 'Endpoint accepts invalid/expired tokens',
+        risk: 'Tokens that should be rejected are accepted, leading to potential misuse.',
+        fix: [
+            'Properly validate tokens server-side.',
+            'Expire and revoke tokens appropriately.'
+        ],
+        priority: 'HIGH'
+    },
+    COOKIE_BYPASS: {
+        issue: 'Endpoint accessible with cookies stripped',
+        risk: 'Session/cookie validation is insufficient, allowing bypass.',
+        fix: [
+            'Validate session cookies on the server.',
+            'Enforce access control checks even if cookies are absent.'
+        ],
+        priority: 'HIGH'
+    },
+    RESOURCE_NO_AUTH: {
+        issue: 'Resource-specific endpoint accessible without credentials',
+        risk: 'Sensitive or restricted resources exposed to unauthorized users.',
+        fix: [
+            'Restrict access to resource-specific endpoints to authorized users only.',
+            'Implement role-based access control where applicable.'
+        ],
+        priority: 'CRITICAL'
+    }
+};
+
+// Store findings
+let auditFindings = [];
+let testResults = { passed: 0, failed: 0, total: 0 };
+
+// =========================
+// HELPER FUNCTIONS
+// =========================
+function logFinding(remediationKey, context='') {
+    const rem = REMEDIATIONS[remediationKey];
+    pm.test(`❌ ${rem.issue}`, function() {
+        testResults.total++;
+        testResults.failed++;
+        auditFindings.push({
+            key: remediationKey,
+            issue: rem.issue,
+            priority: rem.priority,
+            context,
+            fix: rem.fix
+        });
+        pm.expect.fail(`${rem.issue}. Context: ${context}`);
+    });
+}
+
+function logPass(testName) {
+    pm.test(`✅ ${testName}`, function() {
+        testResults.total++;
+        testResults.passed++;
+        pm.expect(true).to.be.true;
+    });
+}
+
+// =========================
+// TEST 1: No Authentication
+// =========================
+pm.sendRequest({
+    url: pm.request.url.toString(),
+    method: pm.request.method,
+    header: pm.request.headers.filter(h => h.key.toLowerCase() !== 'authorization'),
+    body: pm.request.body
+}, function(err, res) {
+    if (!err) {
+        if (res.code >= 200 && res.code < 400) {
+            logFinding('NO_AUTH_ACCESS', `Response code: ${res.code}`);
+        } else {
+            logPass('No auth request rejected as expected');
+        }
+    }
+});
+
+// =========================
+// TEST 2: Invalid/Expired Token
+// =========================
+let authHeader = pm.request.headers.get('Authorization');
+if (authHeader) {
+    let fakeAuthHeader = authHeader.startsWith('Bearer') ? 'Bearer INVALIDTOKEN12345' :
+                         authHeader.startsWith('Basic') ? 'Basic INVALIDBASE64==' :
+                         authHeader;
+
+    let modifiedHeaders = pm.request.headers.map(h => {
+        if (h.key.toLowerCase() === 'authorization') return { key: h.key, value: fakeAuthHeader };
+        return h;
+    });
+
+    pm.sendRequest({
+        url: pm.request.url.toString(),
+        method: pm.request.method,
+        header: modifiedHeaders,
+        body: pm.request.body
+    }, function(err, res) {
+        if (!err) {
+            if (res.code >= 200 && res.code < 400) {
+                logFinding('INVALID_TOKEN_ACCEPTED', `Response code: ${res.code}`);
+            } else {
+                logPass('Invalid/expired token rejected as expected');
+            }
+        }
+    });
+} else {
+    logPass('No Authorization header present; skipping invalid token test');
+}
+
+// =========================
+// TEST 3: Cookies Stripped
+// =========================
+let headersWithoutCookies = pm.request.headers.filter(h => h.key.toLowerCase() !== 'cookie');
+pm.sendRequest({
+    url: pm.request.url.toString(),
+    method: pm.request.method,
+    header: headersWithoutCookies,
+    body: pm.request.body
+}, function(err, res) {
+    if (!err) {
+        if (res.code >= 200 && res.code < 400) {
+            logFinding('COOKIE_BYPASS', `Response code: ${res.code}`);
+        } else {
+            logPass('Request rejected when cookies stripped');
+        }
+    }
+});
+
+// =========================
+// TEST 4: Resource-Specific Access Without Auth
+// =========================
+// Example: if endpoint contains /users/, /admin/, or other sensitive paths
+const sensitivePaths = ['/admin', '/users', '/settings', '/config', '/secrets'];
+let path = pm.request.url.path.join('/');
+if (sensitivePaths.some(p => path.includes(p))) {
+    pm.sendRequest({
+        url: pm.request.url.toString(),
+        method: pm.request.method,
+        header: pm.request.headers.filter(h => h.key.toLowerCase() !== 'authorization'),
+        body: pm.request.body
+    }, function(err, res) {
+        if (!err) {
+            if (res.code >= 200 && res.code < 400) {
+                logFinding('RESOURCE_NO_AUTH', `Accessed sensitive resource without credentials`);
+            } else {
+                logPass('Sensitive resource correctly restricted');
+            }
+        }
+    });
+} else {
+    logPass('Endpoint not identified as resource-specific; skipping test');
+}
+
+// =========================
+// STORE RESULTS IN COLLECTION VARIABLE
+// =========================
+pm.collectionVariables.set('authBypassAuditResults', JSON.stringify({
+    timestamp: new Date().toISOString(),
+    endpoint: pm.request.url.toString(),
+    summary: testResults,
+    findings: auditFindings
+}));
+
+// =========================
+// FINAL TEST SUMMARY
+// =========================
+pm.test('[SUMMARY] Authentication Bypass Audit Completed', function() {
+    testResults.total++;
+    if (testResults.failed > 0) {
+        pm.expect.fail(`Authentication audit found ${testResults.failed} issue(s). See individual tests for remediation.`);
+    } else {
+        pm.expect(true).to.be.true;
+    }
+});

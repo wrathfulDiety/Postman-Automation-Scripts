@@ -1,0 +1,144 @@
+// ============================================================================
+// POSTMAN GENERIC SECURITY AUDIT: INFORMATION DISCLOSURE
+// ============================================================================
+// Author      : Hasanka Amarasinghe
+// Version     : 1.0
+// Date        : 2025-12-17
+// Purpose     : Detect sensitive information in headers or response body
+//               (system names, versions, internal paths, verbose errors)
+// Notes       : Fully audit-ready. Shows results under Tests tab and stores findings.
+// ============================================================================
+
+// =========================
+// CONFIGURATION / REMEDIATIONS
+// =========================
+const REMEDIATIONS = {
+    SERVER_HEADER: {
+        issue: 'Server header exposes system information',
+        risk: 'Reveals server software or version, aiding attackers in fingerprinting.',
+        fix: [
+            'Remove or mask the Server header in production.',
+            'Do not expose software versions to external clients.'
+        ],
+        priority: 'Medium'
+    },
+    X_POWERED_BY: {
+        issue: 'X-Powered-By header exposes technology stack',
+        risk: 'Reveals backend framework or version, increasing attack surface.',
+        fix: [
+            'Remove or mask X-Powered-By headers.',
+            'Do not disclose framework versions publicly.'
+        ],
+        priority: 'Medium'
+    },
+    VERBOSE_ERROR_BODY: {
+        issue: 'Verbose error or stack trace exposed in response body',
+        risk: 'May leak internal paths, system state, or debug info.',
+        fix: [
+            'Disable detailed error messages in production.',
+            'Mask stack traces or internal identifiers in responses.'
+        ],
+        priority: 'High'
+    },
+    INTERNAL_PATHS_IDS: {
+        issue: 'Internal paths or identifiers exposed in response body',
+        risk: 'Could allow attackers to map internal resources or object IDs.',
+        fix: [
+            'Do not return internal paths or IDs to external clients.',
+            'Use opaque identifiers or remove sensitive fields.'
+        ],
+        priority: 'High'
+    }
+};
+
+// =========================
+// STORE FINDINGS
+// =========================
+let auditFindings = [];
+let testResults = { passed: 0, failed: 0, total: 0 };
+
+// =========================
+// HELPER FUNCTIONS
+// =========================
+function logFinding(remediationKey, context='') {
+    const rem = REMEDIATIONS[remediationKey];
+    pm.test(`❌ ${rem.issue}`, function() {
+        testResults.total++;
+        testResults.failed++;
+        auditFindings.push({
+            key: remediationKey,
+            issue: rem.issue,
+            priority: rem.priority,
+            context,
+            fix: rem.fix
+        });
+        pm.expect.fail(`${rem.issue}. Context: ${context}\nRemediation: ${rem.fix.join(' | ')}`);
+    });
+}
+
+function logPass(testName) {
+    pm.test(`✅ ${testName}`, function() {
+        testResults.total++;
+        testResults.passed++;
+        pm.expect(true).to.be.true;
+    });
+}
+
+function inspectBodyForPatterns(patterns) {
+    let body = pm.response.text();
+    let matches = [];
+    patterns.forEach(pat => {
+        const re = new RegExp(pat.regex, 'gi');
+        const found = body.match(re);
+        if (found) matches.push({key: pat.key, snippet: found.slice(0,3).join(', ')});
+    });
+    return matches;
+}
+
+// =========================
+// DETECTION LOGIC
+// =========================
+
+// 1️⃣ Header Checks
+const headers = pm.response.headers;
+
+const serverHeader = headers.get('Server');
+if (serverHeader) logFinding('SERVER_HEADER', `Header value: ${serverHeader}`);
+else logPass('Server header not present');
+
+const poweredByHeader = headers.get('X-Powered-By');
+if (poweredByHeader) logFinding('X_POWERED_BY', `Header value: ${poweredByHeader}`);
+else logPass('X-Powered-By header not present');
+
+// 2️⃣ Body Checks
+// Patterns to detect verbose errors, internal paths, identifiers
+const bodyPatterns = [
+    { key: 'VERBOSE_ERROR_BODY', regex: 'Exception|StackTrace|Error at line|Unhandled' },
+    { key: 'INTERNAL_PATHS_IDS', regex: '/[\\w\\-/]+\\.php|/api/v[0-9]+/internal/|id=[0-9]+' }
+];
+
+const bodyFindings = inspectBodyForPatterns(bodyPatterns);
+bodyFindings.forEach(f => logFinding(f.key, `Matched content: ${f.snippet}`));
+if(bodyFindings.length === 0) logPass('No verbose errors or internal paths/IDs detected in response body');
+
+// =========================
+// STORE SUMMARY IN COLLECTION VARIABLE
+// =========================
+pm.collectionVariables.set('infoDisclosureAuditResults', JSON.stringify({
+    timestamp: new Date().toISOString(),
+    endpoint: pm.request.url.toString(),
+    summary: testResults,
+    findings: auditFindings
+}));
+
+// =========================
+// FINAL SUMMARY TEST
+// =========================
+pm.test('[SUMMARY] Information Disclosure Audit Completed', function() {
+    testResults.total++;
+    if (testResults.failed > 0) {
+        pm.expect.fail(`Information disclosure audit found ${testResults.failed} issue(s). See individual tests for remediation.`);
+    } else {
+        pm.expect(true).to.be.true;
+    }
+});

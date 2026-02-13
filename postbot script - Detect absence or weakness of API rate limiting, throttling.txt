@@ -1,0 +1,202 @@
+
+// ============================================================================
+// ============================================================================
+// POSTMAN GENERIC SECURITY AUDIT
+// Control : Detect absence or weakness of API rate limiting / throttling
+// Category: API Security Testing 
+// ============================================================================
+// Author  : Hasanka Amarasinghe
+// Version : 1.0
+// Date    : 2025-12-18
+// Usage   : Generic Postman Test script – reusable across requests/collections
+// Purpose : Detect absence or weakness of API rate limiting / throttling
+//           controls using safe, repeatable request replay.
+// Notes   : Findings appear in the Tests tab, Human-readable summary printed to console
+//           Safe iteration count (non-destructive)
+// ============================================================================
+// ============================================================================
+
+
+/* =========================
+   Configuration
+========================= */
+const ITERATIONS = pm.environment.get("rate_limit_iterations")
+  ? parseInt(pm.environment.get("rate_limit_iterations"), 10)
+  : 30;
+
+const THROTTLE_HEADERS = [
+  "retry-after",
+  "x-ratelimit-limit",
+  "x-ratelimit-remaining",
+  "x-ratelimit-reset",
+  "ratelimit-limit",
+  "ratelimit-remaining",
+  "ratelimit-reset"
+];
+
+/* =========================
+   State Tracking
+========================= */
+let results = {
+  totalRequests: 0,
+  successCount: 0,
+  throttledCount: 0,
+  errorCount: 0,
+  throttleHeadersSeen: new Set(),
+  statuses: []
+};
+
+/* =========================
+   Replay Requests (Safe)
+========================= */
+let completed = 0;
+
+for (let i = 0; i < ITERATIONS; i++) {
+  pm.sendRequest(pm.request, function (err, res) {
+    completed++;
+    results.totalRequests++;
+
+    if (err || !res) {
+      results.errorCount++;
+    } else {
+      const status = res.code;
+      results.statuses.push(status);
+
+      if (status === 429) {
+        results.throttledCount++;
+      } else if (status >= 200 && status < 300) {
+        results.successCount++;
+      } else {
+        results.errorCount++;
+      }
+
+      res.headers.all().forEach(h => {
+        if (THROTTLE_HEADERS.includes(h.key.toLowerCase())) {
+          results.throttleHeadersSeen.add(h.key);
+        }
+      });
+    }
+
+    /* =========================
+       Final Evaluation
+    ========================= */
+    if (completed === ITERATIONS) {
+
+      /* ---------- Throttling Headers ---------- */
+      pm.test("Rate Limiting – Throttling Headers Present", function () {
+        if (results.throttleHeadersSeen.size === 0) {
+          pm.expect.fail(
+            `Finding:
+- No rate-limiting or throttling headers detected across ${ITERATIONS} requests.
+
+Severity:
+- High
+
+Remediation:
+- Implement standard rate-limiting headers (Retry-After, X-RateLimit-*).
+- Clearly communicate quota and reset information to clients.
+- Ensure headers are consistently returned on all relevant responses.`
+          );
+        }
+        pm.expect(true).to.be.true;
+      });
+
+      /* ---------- Unrestricted Access ---------- */
+      pm.test("Rate Limiting – Unrestricted Access Check", function () {
+        if (
+          results.successCount === results.totalRequests &&
+          results.throttledCount === 0
+        ) {
+          pm.expect.fail(
+            `Finding:
+- All ${results.totalRequests} requests succeeded with no throttling.
+
+Severity:
+- High
+
+Remediation:
+- Enforce server-side rate limiting per IP, user, token, or API key.
+- Apply burst limits and sustained thresholds.
+- Return HTTP 429 responses when limits are exceeded.`
+          );
+        }
+        pm.expect(true).to.be.true;
+      });
+
+      /* ---------- Effectiveness ---------- */
+      pm.test("Rate Limiting – Effectiveness Assessment", function () {
+        if (
+          results.throttledCount === 0 &&
+          results.throttleHeadersSeen.size === 0
+        ) {
+          pm.expect.fail(
+            `Finding:
+- No evidence of effective throttling detected.
+
+Severity:
+- Medium
+
+Remediation:
+- Validate rate limits trigger under sustained usage.
+- Test limits across IP, token, and user dimensions.
+- Monitor and alert on abuse patterns.`
+          );
+        }
+        pm.expect(true).to.be.true;
+      });
+
+      /* ---------- Summary Test ---------- */
+      pm.test("Rate Limiting – Security Assessment Summary", function () {
+        pm.expect(true).to.be.true;
+      });
+
+      /* =========================
+         Persist Results
+      ========================= */
+      pm.collectionVariables.set(
+        "rate_limit_assessment_summary",
+        JSON.stringify(
+          {
+            totalRequests: results.totalRequests,
+            successfulResponses: results.successCount,
+            throttledResponses: results.throttledCount,
+            errorResponses: results.errorCount,
+            throttleHeadersObserved: Array.from(results.throttleHeadersSeen),
+            conclusion:
+              results.throttledCount > 0 ||
+              results.throttleHeadersSeen.size > 0
+                ? "Rate limiting detected"
+                : "Rate limiting absent or ineffective"
+          },
+          null,
+          2
+        )
+      );
+
+      /* =========================
+         Console Summary (FIXED)
+      ========================= */
+      console.log("=== Rate Limiting Assessment Summary ===");
+      console.log(`Total Requests        : ${results.totalRequests}`);
+      console.log(`Successful Responses  : ${results.successCount}`);
+      console.log(`Throttled Responses   : ${results.throttledCount}`);
+      console.log(`Error Responses       : ${results.errorCount}`);
+      console.log(
+        `Throttle Headers Seen : ${
+          results.throttleHeadersSeen.size > 0
+            ? Array.from(results.throttleHeadersSeen).join(", ")
+            : "None"
+        }`
+      );
+      console.log(
+        `Conclusion            : ${
+          results.throttledCount > 0 ||
+          results.throttleHeadersSeen.size > 0
+            ? "Rate limiting detected"
+            : "Rate limiting ABSENT or INEFFECTIVE"
+        }`
+      );
+      console.log("======================================");
+    }
+  });
+}

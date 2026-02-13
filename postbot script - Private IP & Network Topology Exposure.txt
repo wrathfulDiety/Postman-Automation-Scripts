@@ -1,0 +1,183 @@
+
+// ============================================================================
+// ============================================================================
+// POSTMAN GENERIC SECURITY AUDIT
+// Control : Private IP & Network Topology Exposure
+// Category: API Security Testing – Information Disclosure
+// ============================================================================
+// Author  : Hasanka Amarasinghe
+// Version : 1.1
+// Date    : 2025-12-18
+// Purpose : Detect exposure of private, link-local, or loopback IP addresses
+//           in API response headers and body.
+// Notes   : Results are displayed in the Tests tab only (no console output)
+//           Findings are persisted at collection level for audit reporting
+// ============================================================================
+// ============================================================================
+
+
+/* ============================================================================
+   Configuration – IP Range Patterns & Severity
+============================================================================ */
+const IP_PATTERNS = [
+  {
+    name: "RFC1918 – 10.0.0.0/8",
+    regex: /\b10\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\b/g,
+    severity: "High"
+  },
+  {
+    name: "RFC1918 – 172.16.0.0/12",
+    regex: /\b172\.(1[6-9]|2\d|3[0-1])\.(\d{1,3})\.(\d{1,3})\b/g,
+    severity: "High"
+  },
+  {
+    name: "RFC1918 – 192.168.0.0/16",
+    regex: /\b192\.168\.(\d{1,3})\.(\d{1,3})\b/g,
+    severity: "High"
+  },
+  {
+    name: "Link-Local – 169.254.0.0/16",
+    regex: /\b169\.254\.(\d{1,3})\.(\d{1,3})\b/g,
+    severity: "High"
+  },
+  {
+    name: "Loopback – 127.0.0.0/8",
+    regex: /\b127\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\b/g,
+    severity: "Medium"
+  }
+];
+
+/* ============================================================================
+   State & Helpers
+============================================================================ */
+let findings = [];
+
+function addFinding(location, field, value, pattern, severity) {
+  findings.push({
+    location,
+    field,
+    value,
+    pattern,
+    severity,
+    remediation: [
+      "Remove private, link-local, or loopback IP addresses from external API responses.",
+      "Replace internal IPs with logical identifiers or public-safe hostnames.",
+      "Disable verbose error messages and debug output in production environments.",
+      "Ensure internal network topology details are never exposed to external consumers."
+    ]
+  });
+}
+
+/* ============================================================================
+   Applicability Check
+============================================================================ */
+pm.test("Applicability – Response Content Available", function () {
+  if (!pm.response || (!pm.response.text() && pm.response.headers.count() === 0)) {
+    pm.expect(true, "Not Applicable – No response content to analyze").to.be.true;
+    return;
+  }
+  pm.expect(true).to.be.true;
+});
+
+/* ============================================================================
+   Header Inspection
+============================================================================ */
+pm.test("Private IP Exposure Check – Response Headers", function () {
+  const headers = pm.response.headers.all();
+  let detected = false;
+
+  headers.forEach(header => {
+    IP_PATTERNS.forEach(pattern => {
+      const matches = header.value.match(pattern.regex);
+      if (matches) {
+        detected = true;
+        addFinding(
+          "Response Header",
+          header.key,
+          matches.join(", "),
+          pattern.name,
+          pattern.severity
+        );
+      }
+    });
+  });
+
+  pm.expect(true).to.be.true; // Individual failures handled below
+});
+
+/* ============================================================================
+   Body Inspection
+============================================================================ */
+pm.test("Private IP Exposure Check – Response Body", function () {
+  const body = pm.response.text();
+  if (!body) {
+    pm.expect(true).to.be.true;
+    return;
+  }
+
+  IP_PATTERNS.forEach(pattern => {
+    const matches = body.match(pattern.regex);
+    if (matches) {
+      addFinding(
+        "Response Body",
+        "Body Content",
+        matches.slice(0, 3).join(", "),
+        pattern.name,
+        pattern.severity
+      );
+    }
+  });
+
+  pm.expect(true).to.be.true;
+});
+
+/* ============================================================================
+   Per-Finding Evidence (Tests Tab)
+============================================================================ */
+if (findings.length === 0) {
+  pm.test("No Private, Link-Local, or Loopback IP Addresses Detected", function () {
+    pm.expect(true).to.be.true;
+  });
+} else {
+  findings.forEach((finding, index) => {
+    pm.test(
+      `❌ Private IP Exposure Detected [${finding.severity}] – ${finding.pattern}`,
+      function () {
+        pm.expect.fail(
+`Exposure Location : ${finding.location}
+Field             : ${finding.field}
+Detected Value    : ${finding.value}
+
+Remediation:
+- ${finding.remediation.join("\n- ")}
+`
+        );
+      }
+    );
+  });
+}
+
+/* ============================================================================
+   Summary
+============================================================================ */
+pm.test("Summary – Private IP & Network Topology Exposure Assessment", function () {
+  if (!pm.response) {
+    pm.expect(true).to.be.true;
+  } else if (findings.length > 0) {
+    pm.expect.fail(
+      `Private / link-local IP exposure identified.
+Total Findings: ${findings.length}
+Review failed test cases above for evidence and remediation guidance.`
+    );
+  } else {
+    pm.expect(true).to.be.true;
+  }
+});
+
+/* ============================================================================
+   Persist Findings for Audit / Reporting
+============================================================================ */
+pm.collectionVariables.set(
+  "private_ip_exposure_findings",
+  JSON.stringify(findings, null, 2)
+);
